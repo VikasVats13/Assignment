@@ -1,0 +1,123 @@
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"time"
+)
+
+const (
+	numBarbers        = 2
+	numChairs         = 5
+	closingTime       = 10 // Closing time in seconds
+	clientChance      = 70 // Probability of a new client arriving (0-100)
+	maxHaircutTime    = 5  // Maximum time (seconds) for a haircut
+	maxAdditionalWait = 5  // Maximum additional wait time for a client
+)
+
+var (
+	waitingRoom   chan bool
+	barberChair   chan bool
+	waitingClient chan bool
+	closing       chan bool
+	wg            sync.WaitGroup
+)
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	waitingRoom = make(chan bool, numChairs)
+	barberChair = make(chan bool, 1)
+	waitingClient = make(chan bool, 1)
+	closing = make(chan bool)
+
+	// Initialize the waiting room with chairs
+	for i := 0; i < numChairs; i++ {
+		waitingRoom <- true
+	}
+
+	// Start barbers
+	for i := 0; i < numBarbers; i++ {
+		go barber(i)
+	}
+
+	// Start the clock
+	go func() {
+		time.Sleep(closingTime * time.Second)
+		close(closing)
+	}()
+
+	// Infinite loop to simulate the arrival of clients
+	for {
+		select {
+		case <-closing:
+			wg.Wait() // Wait for all barbers to finish
+			fmt.Println("Shop closed. Barbers went home.")
+			return
+		default:
+			time.Sleep(time.Second) // Sleep to simulate time passing
+
+			// With a certain probability, a new client arrives
+			if rand.Intn(100) < clientChance {
+				wg.Add(1)
+				go client()
+			}
+		}
+	}
+}
+
+func barber(id int) {
+	defer wg.Done()
+
+	fmt.Printf("Barber %d started\n", id+1)
+
+	for {
+		select {
+		case <-closing:
+			fmt.Printf("Barber %d going home\n", id+1)
+			return
+		default:
+			fmt.Printf("Barber %d is sleeping\n", id+1)
+			<-waitingClient
+
+			// Check if there are waiting clients
+			select {
+			case <-waitingRoom:
+				fmt.Printf("Barber %d is working on a client\n", id+1)
+
+				// Simulate haircut time with random additional wait time
+				haircutTime := time.Second * time.Duration(rand.Intn(maxHaircutTime+1))
+				additionalWait := time.Second * time.Duration(rand.Intn(maxAdditionalWait+1))
+				time.Sleep(haircutTime + additionalWait)
+
+				barberChair <- true
+			default:
+				fmt.Printf("Barber %d didn't find any waiting clients\n", id+1)
+				waitingClient <- true
+			}
+		}
+	}
+}
+
+func client() {
+	defer wg.Done()
+
+	fmt.Println("New client arrived")
+
+	select {
+	case waitingRoom <- true:
+		fmt.Println("Client took a seat in the waiting room")
+		waitingClient <- true
+		select {
+		case barberChair <- true:
+			fmt.Println("Client got a haircut")
+		default:
+			fmt.Println("No available barber chair. Client left.")
+			<-waitingRoom
+			waitingClient <- true
+		}
+	default:
+		fmt.Println("No available seat in the waiting room. Client left.")
+	}
+}
