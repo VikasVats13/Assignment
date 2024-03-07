@@ -1,0 +1,160 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+)
+
+const (
+	lastFMAPIKey       = "YOUR_LAST_FM_API_KEY"
+	musixmatchAPIKey   = "YOUR_MUSIXMATCH_API_KEY"
+	googleAPIKey       = "YOUR_GOOGLE_API_KEY"
+	googleCustomSearch = "YOUR_GOOGLE_CUSTOM_SEARCH_ENGINE_ID"
+)
+
+type LastFMTopTrackResponse struct {
+	Tracks struct {
+		Track []struct {
+			Name   string `json:"name"`
+			Artist struct {
+				Name string `json:"name"`
+			} `json:"artist"`
+		} `json:"track"`
+	} `json:"tracks"`
+}
+
+type MusixmatchLyricsResponse struct {
+	Message struct {
+		Body struct {
+			Track struct {
+				Lyrics struct {
+					Body string `json:"lyrics_body"`
+				} `json:"lyrics"`
+			} `json:"track"`
+		} `json:"body"`
+	} `json:"message"`
+}
+
+type LastFMArtistInfoResponse struct {
+	Artist struct {
+		Bio struct {
+			Content string `json:"#cdata-section"`
+		} `json:"bio"`
+		Image []struct {
+			URL string `json:"#text"`
+		} `json:"image"`
+	} `json:"artist"`
+}
+
+type GoogleImageSearchResponse struct {
+	Items []struct {
+		Link string `json:"link"`
+	} `json:"items"`
+}
+
+func main() {
+	http.HandleFunc("/artist-info", getArtistInfo)
+	port := ":8080"
+	fmt.Printf("Server is running on port %s\n", port)
+	http.ListenAndServe(port, nil)
+}
+
+func getArtistInfo(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	region := r.Form.Get("region")
+
+	lastFMAPIEndpoint := fmt.Sprintf("http://ws.audioscrobbler.com/2.0/?method=geo.gettoptracks&country=%s&api_key=%s&format=json", region, lastFMAPIKey)
+	lastFMResponse, err := makeRequest(lastFMAPIEndpoint)
+	if err != nil {
+		http.Error(w, "Error fetching top track from Last.fm", http.StatusInternalServerError)
+		return
+	}
+
+	var topTrackResponse LastFMTopTrackResponse
+	if err := json.Unmarshal(lastFMResponse, &topTrackResponse); err != nil {
+		http.Error(w, "Error parsing Last.fm response", http.StatusInternalServerError)
+		return
+	}
+
+	if len(topTrackResponse.Tracks.Track) == 0 {
+		http.Error(w, "No top tracks found", http.StatusInternalServerError)
+		return
+	}
+
+	topTrackName := topTrackResponse.Tracks.Track[0].Name
+	topTrackArtist := topTrackResponse.Tracks.Track[0].Artist.Name
+
+	musixmatchAPIEndpoint := fmt.Sprintf("https://api.musixmatch.com/ws/1.1/track.search?q_track=%s&q_artist=%s&apikey=%s", url.QueryEscape(topTrackName), url.QueryEscape(topTrackArtist), musixmatchAPIKey)
+	musixmatchResponse, err := makeRequest(musixmatchAPIEndpoint)
+	if err != nil {
+		http.Error(w, "Error fetching lyrics from Musixmatch", http.StatusInternalServerError)
+		return
+	}
+
+	var lyricsResponse MusixmatchLyricsResponse
+	if err := json.Unmarshal(musixmatchResponse, &lyricsResponse); err != nil {
+		http.Error(w, "Error parsing Musixmatch response", http.StatusInternalServerError)
+		return
+	}
+
+	lyrics := lyricsResponse.Message.Body.Track.Lyrics.Body
+
+	lastFMArtistAPIEndpoint := fmt.Sprintf("http://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist=%s&api_key=%s&format=json", url.QueryEscape(topTrackArtist), lastFMAPIKey)
+	lastFMArtistResponse, err := makeRequest(lastFMArtistAPIEndpoint)
+	if err != nil {
+		http.Error(w, "Error fetching artist info from Last.fm", http.StatusInternalServerError)
+		return
+	}
+
+	var artistInfoResponse LastFMArtistInfoResponse
+	if err := json.Unmarshal(lastFMArtistResponse, &artistInfoResponse); err != nil {
+		http.Error(w, "Error parsing Last.fm artist response", http.StatusInternalServerError)
+		return
+	}
+
+	artistInfo := artistInfoResponse.Artist.Bio.Content
+	var imageLink string
+	if len(artistInfoResponse.Artist.Image) > 0 {
+		imageLink = artistInfoResponse.Artist.Image[0].URL
+	}
+
+	googleImageSearchEndpoint := fmt.Sprintf("https://www.googleapis.com/customsearch/v1?q=%s&key=%s&cx=%s", url.QueryEscape(topTrackArtist), googleAPIKey, googleCustomSearch)
+	googleImageSearchResponse, err := makeRequest(googleImageSearchEndpoint)
+	if err != nil {
+		http.Error(w, "Error performing Google Image Search", http.StatusInternalServerError)
+		return
+	}
+	fmt.Println(imageLink)
+
+	var googleImageLink string
+	var googleResponse GoogleImageSearchResponse
+	if err := json.Unmarshal(googleImageSearchResponse, &googleResponse); err != nil {
+		http.Error(w, "Error parsing Google Image Search response", http.StatusInternalServerError)
+		return
+	}
+
+	if len(googleResponse.Items) > 0 {
+		googleImageLink = googleResponse.Items[0].Link
+	}
+
+	response := fmt.Sprintf("Top Track: %s\nLyrics: %s\nArtist Info: %s\nImage Link: %s\n", topTrackName, lyrics, artistInfo, googleImageLink)
+	fmt.Fprint(w, response)
+}
+
+func makeRequest(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return body, nil
+}
